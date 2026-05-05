@@ -536,10 +536,14 @@ class Runner:
                         LOG.error(f'Error posting value for {k}: {e}')
 
                 # Update CA component
-                pv = self.ca_pvs.get(k)
-                if pv is not None:
-                    asyncio.run(pv.write(v, timestamp=latest_ts))
-                    #asyncio.run(pv.write_metadata(timestamp=latest_ts))
+                capv = self.ca_pvs.get(k)
+                if capv is not None:
+                    # caproto can only understand native python types, not necessarily what the model gives us.
+                    nv = self.pv_handlers[k].value_to_native(
+                        self.model.supported_variables[k],
+                        v
+                    )
+                    asyncio.run(capv.write(nv, timestamp=latest_ts))
 
             # Back to Idle
             self.model_state = ModelState.Idle

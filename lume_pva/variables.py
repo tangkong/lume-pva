@@ -105,6 +105,41 @@ class VariableHandler(ABC):
         """
         raise NotImplementedError()
 
+    @abstractmethod
+    def value_to_native(self, variable: Variable, value: Any) -> Any:
+        """
+        Performs fixups for the specified value so caproto can understand it. For most variable types, this function
+        won't need to do anything (default impl is fine). For variable types dealing with Numpy or Tensor types, this
+        function will need to convert to the appropriate native Python type
+
+        Parameters
+        ----------
+        variable : Variable
+            The variable to pack for
+        value : Any
+            The value to pack
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def native_to_value(self, variable: Variable, value: Any) -> Any:
+        """
+        Unpacks (converts) the native Python type to a type that underlying variable can understand.
+
+        Parameters
+        ----------
+        variable : Variable
+            The variable to pack for.
+        value : Any
+            The value to convert
+
+        Returns
+        -------
+        Any :
+            Converted value that can be accepted by `variable`
+        """
+        raise NotImplementedError()
+
 class ScalarVariableHandler(VariableHandler):
     """Variable handler for LUME ScalarVariable, and the TorchScalarVariable type"""
 
@@ -175,6 +210,15 @@ class ScalarVariableHandler(VariableHandler):
             return int(v)
         else:
             return float(v)
+
+    def value_to_native(self, variable: ScalarVariable | IntVariable, value: ScalarType) -> Any:
+        if isinstance(variable, ScalarVariable):
+            return float(value)
+        else:
+            return int(value)
+
+    def native_to_value(self, variable: ScalarVariable | IntVariable, value: float | int) -> ScalarType:
+        return value
 
 class NDVariableHandler(VariableHandler):
     """Variable handler for LUME NDVariable type"""
@@ -283,6 +327,17 @@ class NDVariableHandler(VariableHandler):
             value = value.tolist()
         return value
 
+    def value_to_native(self, variable: NDVariable | TorchNDVariable, value: ndarray | torch.Tensor) -> list:
+        return value.flatten().tolist()
+    
+    def native_to_value(self, variable: NDVariable | TorchNDVariable, value: list) -> ndarray | torch.Tensor:
+        if isinstance(variable, TorchNDVariable):
+            return torch.Tensor(value, size=variable.shape, dtype=variable.dtype)
+        elif isinstance(variable, NDVariable):
+            return np.array(value, dtype=variable.dtype).reshape(variable.shape)
+        else:
+            raise NotImplementedError()
+
 class TorchScalarVariableHandler(VariableHandler):
     """Handler for TorchScalarVariable"""
 
@@ -309,6 +364,12 @@ class TorchScalarVariableHandler(VariableHandler):
 
     def default_value(self, variable: TorchScalarVariable, flatten: bool = False, native_python: bool = False):
         return variable.default_value if variable.default_value is not None else 0.0
+
+    def native_to_value(self, variable: TorchScalarVariable, value: float) -> TorchScalarType:
+        return value
+    
+    def value_to_native(self, variable: TorchScalarVariable, value: TorchScalarType) -> float:
+        return float(value)
 
 class SimpleScalarHandler(VariableHandler):
     """Handler for StrVariable"""
@@ -343,6 +404,12 @@ class SimpleScalarHandler(VariableHandler):
             return ''
         else:
             raise TypeError('Unsupported variable type for SimpleScalarHandler')
+
+    def value_to_native(self, variable: StrVariable | BoolVariable, value):
+        return value
+    
+    def native_to_value(self, variable: StrVariable | BoolVariable, value):
+        return value
 
 
 def find_variable_handler(type) -> VariableHandler | None:
