@@ -65,7 +65,7 @@ class SimpleMathModel(LUMEModel):
             ),
             "desc": StrVariable(
                 name="desc",
-                default_value="Hello, world!",
+                #default_value="Hello, world!",
                 read_only=True
             ),
             "sum_output": ScalarVariable(

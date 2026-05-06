@@ -332,6 +332,7 @@ class Runner:
             name=f'{pv}',
             value=default_value,
             put=self._on_caput,
+            max_length=1024 if isinstance(default_value, str) else None
         ).create()
         self.pvdb[f'{prefix}{pv}'] = pvd
         self.ca_pvs[var.name] = pvd
