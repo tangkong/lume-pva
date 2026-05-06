@@ -11,7 +11,7 @@ from queue import Queue
 from enum import IntEnum
 from lume_pva.variables import VariableHandler, find_variable_handler
 from caproto.server import PVSpec, PvpropertyData
-from caproto import ChannelType
+from caproto import SkipWrite
 import caproto.server
 import caproto
 import time
@@ -332,7 +332,8 @@ class Runner:
             name=f'{pv}',
             value=default_value,
             put=self._on_caput,
-            max_length=1024 if isinstance(default_value, str) else None
+            record='waveform' if isinstance(default_value, str) else None,
+            max_length=1024 if isinstance(default_value, str) else None,
         ).create()
         self.pvdb[f'{prefix}{pv}'] = pvd
         self.ca_pvs[var.name] = pvd
@@ -397,6 +398,9 @@ class Runner:
         if var is None:
             LOG.warning(f'CA: Unknown variable {instance.name} has no entry in PV -> VAR mapping')
             return
+        if self.model.supported_variables[var].read_only:
+            LOG.warning(f'CA: Rejected write to read-only variable "{var}" via PV "{instance.name}"')
+            raise PermissionError('Read only PV')
         self.queue.put({var: {'value': value, 'ts': time.time()}})
 
     def _create_control_pvs(self):
