@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
-from lume.variables import Variable, ScalarVariable, NDVariable, BoolVariable, IntVariable, StrVariable
+from lume.variables import Variable, ScalarVariable, NDVariable, BoolVariable, IntVariable, StrVariable, EnumVariable
 from lume_torch.variables import TorchScalarVariable, TorchNDVariable
 from typing import Any, Dict
 from p4p import Type, Value
-from p4p.nt import NTScalar, NTNDArray
+from p4p.nt import NTScalar, NTNDArray, NTEnum
 from lume_pva.epics import epicsAlarmSeverity, epicsAlarmStatus
 from numpy import ndarray
+from caproto import ChannelType
 import numpy as np
 import torch
 
@@ -85,6 +86,79 @@ class VariableHandler(ABC):
         """
         return True
 
+    @abstractmethod
+    def default_value(self, variable: Variable, flatten: bool = False, native_python: bool = False) -> Any:
+        """
+        Fetches the default value for the Variable.
+        This will always return a valid object that matches the requested dtype or underlying datatype
+        of the variable.
+        
+        Parameters
+        ----------
+        variable : Variable
+            The variable to generate a default for
+        flatten : bool
+            For N-dimensional types, flatten before returning
+        native_python : bool
+            Convert the type to a native python type (i.e. np.array -> list).
+            Raises TypeError() if that is not possible.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def value_to_native(self, variable: Variable, value: Any) -> Any:
+        """
+        Performs fixups for the specified value so caproto can understand it. For most variable types, this function
+        won't need to do anything (default impl is fine). For variable types dealing with Numpy or Tensor types, this
+        function will need to convert to the appropriate native Python type
+
+        Parameters
+        ----------
+        variable : Variable
+            The variable to pack for
+        value : Any
+            The value to pack
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def native_to_value(self, variable: Variable, value: Any) -> Any:
+        """
+        Unpacks (converts) the native Python type to a type that underlying variable can understand.
+
+        Parameters
+        ----------
+        variable : Variable
+            The variable to pack for.
+        value : Any
+            The value to convert
+
+        Returns
+        -------
+        Any :
+            Converted value that can be accepted by `variable`
+        """
+        raise NotImplementedError()
+
+    def ca_pvspec(self, variable: Variable) -> dict:
+        """
+        Returns a dict of additional to be passed to caproto's PVSpec.
+        Use this to set max_elements, the record type, etc., if necessary.
+        Default implementation returns an empty dict.
+        
+        Parameters
+        ----------
+        variable : Variable
+            The variable to create the spec for
+            
+        Returns
+        -------
+        dict :
+            List of args to be unpacked into PVSpec constructor
+        """
+        return {}
+
+
 class ScalarVariableHandler(VariableHandler):
     """Variable handler for LUME ScalarVariable, and the TorchScalarVariable type"""
 
@@ -128,10 +202,7 @@ class ScalarVariableHandler(VariableHandler):
 
     def pack_value(self, variable: ScalarVariable | IntVariable, type_: Type, value: ScalarType | None) -> Value:
         if value is None: # Use default if not provided
-            if variable.default_value is None:
-                value = 0
-            else:
-                value = variable.default_value
+            value = self.default_value(variable)
 
         # Force cast to int for int variables, otherwise we trip validation
         if isinstance(variable, IntVariable):
@@ -152,6 +223,21 @@ class ScalarVariableHandler(VariableHandler):
         else:
             return float(value['value'])
 
+    def default_value(self, variable: ScalarVariable | IntVariable, flatten: bool = False, native_python: bool = False):
+        v = variable.default_value if variable.default_value is not None else 0
+        if isinstance(variable, IntVariable):
+            return int(v)
+        else:
+            return float(v)
+
+    def value_to_native(self, variable: ScalarVariable | IntVariable, value: ScalarType) -> Any:
+        if isinstance(variable, ScalarVariable):
+            return float(value)
+        else:
+            return int(value)
+
+    def native_to_value(self, variable: ScalarVariable | IntVariable, value: float | int) -> ScalarType:
+        return value
 
 class NDVariableHandler(VariableHandler):
     """Variable handler for LUME NDVariable type"""
@@ -180,7 +266,7 @@ class NDVariableHandler(VariableHandler):
                 return 'uintValue'
             case np.uint64 | torch.uint64:
                 return 'ulongValue'
-            case np.str_:
+            case np.str_ | np.dtypes.StringDType():
                 return 'stringValue'
             case _:
                 raise TypeError(f'{variable.name}: Unsupported type "{variable.dtype.__class__}"')
@@ -195,7 +281,7 @@ class NDVariableHandler(VariableHandler):
 
     def create_type(self, variable: NDVariable | TorchNDVariable) -> Type:
         # NTNDArray (per the NT spec) does not support string[] as a value type. We'll deviate from the standard a bit here
-        if variable.dtype in [np.str_]:
+        if variable.dtype in [np.str_, np.dtypes.StringDType()]:
             extras = [
                 ('value', ('U', None, [
                     ('stringValue', 'as')
@@ -207,12 +293,7 @@ class NDVariableHandler(VariableHandler):
     
     def pack_value(self, variable: NDVariable | TorchNDVariable, type_: Type, value: ndarray | torch.Tensor | None) -> Value:
         if value is None: # Use default if not provided
-            if variable.default_value is not None:
-                value = variable.default_value
-            elif isinstance(variable, TorchNDVariable):
-                value = torch.zeros(size=variable.shape, dtype=variable.dtype)
-            elif isinstance(variable, NDVariable):
-                value = np.zeros(shape=variable.shape, dtype=variable.dtype)
+            value = self.default_value(variable)
 
         if not isinstance(value, ndarray):
             raise ValueError(f'NDVariable expectes an ndarray, but got {type(value)}')
@@ -248,6 +329,34 @@ class NDVariableHandler(VariableHandler):
         else:
             raise ValueError(f'Internal error: invalid value type {type(arr)}')
 
+    def default_value(self, variable: NDVariable | TorchNDVariable, flatten: bool = False, native_python: bool = False) -> ndarray | torch.Tensor:
+        value = variable.default_value
+        if value is None:
+            if variable.dtype in [np.str_, np.dtypes.StringDType()]:
+                value = np.full(shape=(variable.shape), fill_value='', dtype=variable.dtype)
+            elif isinstance(variable, TorchNDVariable):
+                value = torch.zeros(size=variable.shape, dtype=variable.dtype)
+            elif isinstance(variable, NDVariable):
+                value = np.zeros(shape=variable.shape, dtype=variable.dtype)
+            else:
+                raise TypeError()
+        if flatten:
+            value = value.flatten()
+        if native_python:
+            value = value.tolist()
+        return value
+
+    def value_to_native(self, variable: NDVariable | TorchNDVariable, value: ndarray | torch.Tensor) -> list:
+        return value.flatten().tolist()
+    
+    def native_to_value(self, variable: NDVariable | TorchNDVariable, value: list) -> ndarray | torch.Tensor:
+        if isinstance(variable, TorchNDVariable):
+            return torch.Tensor(value, size=variable.shape, dtype=variable.dtype)
+        elif isinstance(variable, NDVariable):
+            return np.array(value, dtype=variable.dtype).reshape(variable.shape)
+        else:
+            raise NotImplementedError()
+
 class TorchScalarVariableHandler(VariableHandler):
     """Handler for TorchScalarVariable"""
 
@@ -258,12 +367,9 @@ class TorchScalarVariableHandler(VariableHandler):
 
     def pack_value(self, variable: TorchScalarVariable, type_: Type, value: TorchScalarType | None) -> Value:
         if value is None: # Use default if not provided
-            if variable.default_value is None:
-                value = 0
-            else:
-                value = variable.default_value
+            value = self.default_value(variable)
 
-        if not isinstance(value, (torch.Tensor, float, int)):
+        if not isinstance(value, self.TorchScalarType):
             raise ValueError(f'ScalarVariable {variable.name} expects torch.Tensor, int or float, but got {type(value)}')
 
         v = Value(
@@ -272,8 +378,17 @@ class TorchScalarVariableHandler(VariableHandler):
         ScalarVariableHandler.set_metadata(variable, v, float(value))
         return v
 
-    def unpack_value(self, variable: ScalarVariable, value: Value) -> float:
+    def unpack_value(self, variable: TorchScalarVariable, value: Value) -> float:
         return float(value['value'])
+
+    def default_value(self, variable: TorchScalarVariable, flatten: bool = False, native_python: bool = False):
+        return variable.default_value if variable.default_value is not None else 0.0
+
+    def native_to_value(self, variable: TorchScalarVariable, value: float) -> TorchScalarType:
+        return value
+    
+    def value_to_native(self, variable: TorchScalarVariable, value: TorchScalarType) -> float:
+        return float(value)
 
 class SimpleScalarHandler(VariableHandler):
     """Handler for StrVariable"""
@@ -283,15 +398,7 @@ class SimpleScalarHandler(VariableHandler):
 
     def pack_value(self, variable: StrVariable | BoolVariable, type_: Type, value: str | bool | None) -> Value:
         if value is None:
-            if variable.default_value is None:
-                if isinstance(variable, BoolVariable):
-                    value = False
-                elif isinstance(variable, StrVariable):
-                    value = ''
-                else:
-                    raise ValueError('Unsupported variable type for SimpleScalarHandler')
-            else:
-                value = variable.default_value
+            value = self.default_value(variable)
 
         if isinstance(variable, StrVariable) and not isinstance(value, str):
             raise ValueError(f'StrVariable {variable.name} expects str, but got {type(value)}')
@@ -307,26 +414,76 @@ class SimpleScalarHandler(VariableHandler):
         else:
             return str(value['value'])
 
-class StringVariableHandler(VariableHandler):
-    """Handler for StrVariable"""
+    def default_value(self, variable: StrVariable | BoolVariable, flatten: bool = False, native_python: bool = False) -> bool | str:
+        if variable.default_value is not None:
+            return variable.default_value
+        elif isinstance(variable, BoolVariable):
+            return False
+        elif isinstance(variable, StrVariable):
+            return ''
+        else:
+            raise TypeError('Unsupported variable type for SimpleScalarHandler')
+
+    def value_to_native(self, variable: StrVariable | BoolVariable, value):
+        return value
     
-    def create_type(self, variable: BoolVariable):
-        return NTScalar.buildType('?')
-    
-    def pack_value(self, variable: StrVariable, type_: Type, value: str) -> Value:
+    def native_to_value(self, variable: StrVariable | BoolVariable, value):
+        return value
+
+    def ca_pvspec(self, variable: StrVariable | BoolVariable):
+        if isinstance(variable, StrVariable):
+            # Need to force record type and length for strings, otherwise default_value dictates the length.
+            # caproto also seems to have trouble handling strings (by default treating them as enums)
+            return {'record': 'waveform', 'max_length': 1024}
+        else:
+            return {}
+
+class EnumVariableHandler(VariableHandler):
+    """Handler for EnumVariable"""
+
+    def create_type(self, variable: EnumVariable) -> Type:
+        return NTEnum.buildType()
+
+    def pack_value(self, variable: EnumVariable, type_: Type, value: int | str | None) -> Value:
         if value is None:
-            if variable.default_value is None:
-                value = ''
-            else:
-                value = variable.default_value
-                
-        if not isinstance(value, str):
-            raise ValueError(f'StrVariable {variable.name} expects str, but got {type(value)}')
-        
-        return Value(type_, {'value': value})
+            value = self.default_value(variable)
+
+        idx = value
+        if isinstance(value, str):
+            idx = variable.options.index(value)
+
+        return Value(type_, {
+            'value': {
+                'choices': variable.options,
+                'index': idx,
+            }
+        })
+
+    def unpack_value(self, variable: EnumVariable, value: Value) -> str:
+        idx = value['value']['index']
+        if idx > len(variable.options):
+            raise IndexError('Index is out of range')
+        return variable.options[idx]
+
+    def default_value(self, variable: EnumVariable, flatten: bool = False, native_python: bool = False) -> int:
+        if variable.default_value is not None:
+            return variable.default_value
+        return variable.options[0]
+
+    def value_to_native(self, variable: EnumVariable, value: str | int):
+        return value
+
+    def native_to_value(self, variable: EnumVariable, value):
+        return value
     
-    def unpack_value(self, variable: StrVariable, value: Value) -> str:
-        return str(value['value'])
+    def ca_pvspec(self, variable: EnumVariable):
+        return {
+            'record': 'mbbi',
+            'dtype': ChannelType.ENUM,
+            'cls_kwargs': {
+                'enum_strings': variable.options,
+            }
+        }
 
 
 def find_variable_handler(type) -> VariableHandler | None:
@@ -338,5 +495,6 @@ def find_variable_handler(type) -> VariableHandler | None:
         TorchNDVariable: NDVariableHandler(),
         BoolVariable: SimpleScalarHandler(),
         StrVariable: SimpleScalarHandler(),
+        EnumVariable: EnumVariableHandler(),
     }
     return VARIABLE_HANDLERS.get(type, None)

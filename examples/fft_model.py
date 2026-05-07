@@ -27,7 +27,8 @@ class FFTModel(LUMEModel):
             "signal_c": np.zeros(shape=(1024), dtype=np.float64),
             "fft_real": np.zeros(shape=(1024), dtype=np.float64),
             "fft_imag": np.zeros(shape=(1024), dtype=np.float64),
-            "string_array": np.array(['hello', 'this', 'is', 'a', 'string', 'array'], dtype=np.str_)
+            "string_array": np.array(['hello', 'this', 'is', 'a', 'string', 'array'], dtype=np.dtypes.StringDType()),
+            "2d_array": np.random.random_integers(1, 100, size=(64, 32)).astype(np.float64)
         }
 
         # Current state (will be modified during simulation)
@@ -74,9 +75,16 @@ class FFTModel(LUMEModel):
                 name="string_array",
                 unit="dimensionless",
                 shape=(6,),
-                dtype=np.str_,
+                dtype=np.dtypes.StringDType(),
                 read_only=True, # This is a static output
-            )
+            ),
+            "2d_array": NDVariable(
+                name="2d_array",
+                unit="dimensionless",
+                shape=(64,32),
+                dtype=np.float64,
+                read_only=True
+            ),
         }
     
     @property
