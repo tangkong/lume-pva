@@ -27,6 +27,8 @@ import socket
 import asyncio
 
 LOG = logging.getLogger("LumePva")
+logging.getLogger("caproto").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 VALID_PV_MODES = ["rw", "ro", "remote"]
 VALID_MODEL_MODES = ["continuous", "snapshot"]
@@ -333,9 +335,7 @@ class Runner:
         if isinstance(default_value, list) and isinstance(default_value[0], str):
             return
 
-        LOG.debug(
-            f"Creaing CA PV: pv={pv} var_name={var.name} default={default_value} type={type(default_value)}"
-        )
+        LOG.debug(f"Creaing CA PV: pv={pv} var_name={var.name}")
         pvd = PVSpec(
             name=f"{pv}",
             value=default_value,
@@ -399,7 +399,6 @@ class Runner:
         self.providers[f"{self.config['prefix']}{pv}"] = self.pvs[pv]
 
     async def _on_caput(self, instance: PvpropertyData, value: Any):
-        LOG.debug(f"CA: {instance} -> {value} (type={type(value)})")
         # FIXME: This sucks big time! This callback will always be run whenever we set the value, even internally with pv.write/write_metadata
         # So, we'll need to ignore internal updates manually to avoid infinite loops, writes to read-only PVs, etc.
         # This *could* result in caputs getting dropped if they arrive right as the model is publishing results, though!
@@ -534,14 +533,17 @@ class Runner:
             )
 
             # Get new simulated values
+            get_start = time.perf_counter()
             out_values = self.model.get(self.model.supported_variables)
+            LOG.debug(
+                f"Model get() took {(time.perf_counter() - get_start) * 1000.0:.3f} ms"
+            )
 
             self.model_state = ModelState.Posting
 
             # Update output PVs with new values
+            pv_update_start = time.perf_counter()
             for k, v in out_values.items():
-                LOG.debug(f"Post: {k} -> {v}")
-
                 # Avoid attempting to post to client monitors
                 if k in self.subs:
                     continue
@@ -562,6 +564,9 @@ class Runner:
                         self.model.supported_variables[k], v
                     )
                     asyncio.run(capv.write(nv, timestamp=latest_ts))
+            LOG.debug(
+                f"PV update loop took {(time.perf_counter() - pv_update_start) * 1000.0:.3f} ms"
+            )
 
             # Back to Idle
             self.model_state = ModelState.Idle
