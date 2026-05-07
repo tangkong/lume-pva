@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
-from lume.variables import Variable, ScalarVariable, NDVariable, BoolVariable, IntVariable, StrVariable
+from lume.variables import Variable, ScalarVariable, NDVariable, BoolVariable, IntVariable, StrVariable, EnumVariable
 from lume_torch.variables import TorchScalarVariable, TorchNDVariable
 from typing import Any, Dict
 from p4p import Type, Value
-from p4p.nt import NTScalar, NTNDArray
+from p4p.nt import NTScalar, NTNDArray, NTEnum
 from lume_pva.epics import epicsAlarmSeverity, epicsAlarmStatus
 from numpy import ndarray
 from caproto import ChannelData, ChannelDouble, ChannelInteger, ChannelString, ChannelEnum
@@ -412,6 +412,56 @@ class SimpleScalarHandler(VariableHandler):
         return value
 
 
+class EnumVariableHandler(VariableHandler):
+    """Handler for EnumVariable"""
+
+    def create_type(self, variable: EnumVariable) -> Type:
+        extras = [
+            ('values', 'as'),
+            ('indices', 'ai'),
+        ]
+        return Type(
+            extras,
+            base=NTEnum.buildType()
+        )
+
+    def pack_value(self, variable: EnumVariable, type_: Type, value: int | str | None) -> Value:
+        if value is None:
+            value = self.default_value(variable)
+
+        v = {
+            'values': list(variable.options.values()),
+            'indices': list(variable.options.keys())
+        }
+
+        if isinstance(value, int):
+            idx = list(variable.options.keys()).index(value)
+        elif isinstance(value, str):
+            idx = list(variable.options.values()).index(value)
+
+        v['value'] = {
+            'choices': list(variable.options.keys()),
+            'index': idx
+        }
+
+        return Value(type_, v)
+
+    def unpack_value(self, variable: EnumVariable, value: Value) -> str:
+        return value['values'][value['value']['index']]
+
+    def default_value(self, variable: EnumVariable, flatten: bool = False, native_python: bool = False) -> str:
+        if variable.default_value is not None:
+            return variable.default_value
+        else:
+            return variable.options.values()[0]
+
+    def value_to_native(self, variable: EnumVariable, value):
+        return value
+    
+    def native_to_value(self, variable: EnumVariable, value):
+        return value
+
+
 def find_variable_handler(type) -> VariableHandler | None:
     VARIABLE_HANDLERS = {
         ScalarVariable: ScalarVariableHandler(),
@@ -421,5 +471,6 @@ def find_variable_handler(type) -> VariableHandler | None:
         TorchNDVariable: NDVariableHandler(),
         BoolVariable: SimpleScalarHandler(),
         StrVariable: SimpleScalarHandler(),
+        EnumVariable: EnumVariableHandler(),
     }
     return VARIABLE_HANDLERS.get(type, None)

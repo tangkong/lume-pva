@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from lume.model import LUMEModel
-from lume.variables import ScalarVariable, IntVariable, BoolVariable, StrVariable
+from lume.variables import ScalarVariable, IntVariable, BoolVariable, StrVariable, EnumVariable
 from typing import Any
 from lume_pva.runner import Runner
 from lume_pva.simulator import SimpleSimulator
@@ -24,6 +24,7 @@ class SimpleMathModel(LUMEModel):
             "invert": False,
             "desc": "Hello, world!",
             "sum_output": 2.0,
+            "my_enum": 2,
         }
         # Current state (will be modified during simulation)
         self._state = self._initial_state.copy()
@@ -73,6 +74,15 @@ class SimpleMathModel(LUMEModel):
                 default_value=2.0,
                 unit="dimensionless", 
                 read_only=True  # This is computed, not set directly
+            ),
+            "my_enum": EnumVariable(
+                name="my_enum",
+                default_value="test",
+                options={
+                    2: "test",
+                    0: "hello",
+                    10: "HELP!",
+                },
             )
         }
     
