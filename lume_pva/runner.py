@@ -10,7 +10,7 @@ from collections.abc import Callable
 from queue import Queue
 from enum import IntEnum
 from lume_pva.variables import VariableHandler, find_variable_handler
-from caproto.server import PVSpec, PvpropertyData
+from caproto.server import PVSpec, PvpropertyData, pvproperty
 from caproto import SkipWrite
 import caproto.server
 import caproto
@@ -328,12 +328,12 @@ class Runner:
         if isinstance(default_value, list) and isinstance(default_value[0], str):
             return
 
+        LOG.debug(f'Creaing CA PV: pv={pv} var_name={var.name} default={default_value} type={type(default_value)}')
         pvd = PVSpec(
             name=f'{pv}',
             value=default_value,
             put=self._on_caput,
-            record='waveform' if isinstance(default_value, str) else None,
-            max_length=1024 if isinstance(default_value, str) else None,
+            **handler.ca_pvspec(var)
         ).create()
         self.pvdb[f'{prefix}{pv}'] = pvd
         self.ca_pvs[var.name] = pvd

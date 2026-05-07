@@ -6,7 +6,7 @@ from p4p import Type, Value
 from p4p.nt import NTScalar, NTNDArray, NTEnum
 from lume_pva.epics import epicsAlarmSeverity, epicsAlarmStatus
 from numpy import ndarray
-from caproto import ChannelData, ChannelDouble, ChannelInteger, ChannelString, ChannelEnum
+from caproto import ChannelType
 import numpy as np
 import torch
 
@@ -139,6 +139,25 @@ class VariableHandler(ABC):
             Converted value that can be accepted by `variable`
         """
         raise NotImplementedError()
+
+    def ca_pvspec(self, variable: Variable) -> dict:
+        """
+        Returns a dict of additional to be passed to caproto's PVSpec.
+        Use this to set max_elements, the record type, etc., if necessary.
+        Default implementation returns an empty dict.
+        
+        Parameters
+        ----------
+        variable : Variable
+            The variable to create the spec for
+            
+        Returns
+        -------
+        dict :
+            List of args to be unpacked into PVSpec constructor
+        """
+        return {}
+
 
 class ScalarVariableHandler(VariableHandler):
     """Variable handler for LUME ScalarVariable, and the TorchScalarVariable type"""
@@ -411,55 +430,57 @@ class SimpleScalarHandler(VariableHandler):
     def native_to_value(self, variable: StrVariable | BoolVariable, value):
         return value
 
+    def ca_pvspec(self, variable: StrVariable | BoolVariable):
+        if isinstance(variable, StrVariable):
+            # Need to force record type and length for strings, otherwise default_value dictates the length.
+            # caproto also seems to have trouble handling strings (by default treating them as enums)
+            return {'record': 'waveform', 'max_length': 1024}
+        else:
+            return {}
 
 class EnumVariableHandler(VariableHandler):
     """Handler for EnumVariable"""
 
     def create_type(self, variable: EnumVariable) -> Type:
-        extras = [
-            ('values', 'as'),
-            ('indices', 'ai'),
-        ]
-        return Type(
-            extras,
-            base=NTEnum.buildType()
-        )
+        return NTEnum.buildType()
 
     def pack_value(self, variable: EnumVariable, type_: Type, value: int | str | None) -> Value:
         if value is None:
             value = self.default_value(variable)
 
-        v = {
-            'values': list(variable.options.values()),
-            'indices': list(variable.options.keys())
-        }
-
-        if isinstance(value, int):
-            idx = list(variable.options.keys()).index(value)
-        elif isinstance(value, str):
+        idx = value
+        if isinstance(value, str):
             idx = list(variable.options.values()).index(value)
 
-        v['value'] = {
-            'choices': list(variable.options.keys()),
-            'index': idx
-        }
-
-        return Value(type_, v)
+        return Value(type_, {
+            'value': {
+                'choices': list(variable.options.values()),
+                'index': idx,
+            }
+        })
 
     def unpack_value(self, variable: EnumVariable, value: Value) -> str:
-        return value['values'][value['value']['index']]
+        return value['value']['choices'][value['value']['index']]
 
-    def default_value(self, variable: EnumVariable, flatten: bool = False, native_python: bool = False) -> str:
+    def default_value(self, variable: EnumVariable, flatten: bool = False, native_python: bool = False) -> int:
         if variable.default_value is not None:
             return variable.default_value
-        else:
-            return variable.options.values()[0]
+        return list(variable.options.values())[0]
 
-    def value_to_native(self, variable: EnumVariable, value):
+    def value_to_native(self, variable: EnumVariable, value: str | int):
         return value
-    
+
     def native_to_value(self, variable: EnumVariable, value):
         return value
+    
+    def ca_pvspec(self, variable: EnumVariable):
+        return {
+            'record': 'mbbi',
+            'dtype': ChannelType.ENUM,
+            'cls_kwargs': {
+                'enum_strings': tuple(variable.options.values()),
+            }
+        }
 
 
 def find_variable_handler(type) -> VariableHandler | None:
