@@ -57,6 +57,8 @@ class RunnerConfig(TypedDict):
         Remote PVs are unaffected by this setting, this only applies to PVs we are serving.
     variables : Dict[str, RunnerVariable]
         List of model variables
+    protocol : list[str]
+        List of supported protocols
     """
 
     class RunnerVariable(TypedDict):
@@ -82,6 +84,7 @@ class RunnerConfig(TypedDict):
     remote_model_mode: str
     prefix: str
     variables: Dict[str, RunnerVariable]
+    protocol: list[str]
 
 
 class Runner:
@@ -321,29 +324,37 @@ class Runner:
         handler : VariableHandler
             The variable handler for this variable type
         """
-        pvobj = SharedPV(
-            handler=Runner.Handler(variable=var, runner=self, read_only=ro),
-            initial=self._generate_value(var.name, None),
-        )
-        self.pvs[var.name] = pvobj
-        self.providers[f"{prefix}{pv}"] = pvobj
+        protos = self.config.get('protocol', ['ca', 'pva'])
 
-        # Generate a default value suitable for caproto (native types, flattened)
-        default_value = handler.default_value(var, flatten=True, native_python=True)
+        if 'pva' in protos:
+            pvobj = SharedPV(
+                handler=Runner.Handler(
+                    variable=var,
+                    runner=self,
+                    read_only=ro
+                ),
+                initial=self._generate_value(var.name, None)
+            )
+            self.pvs[var.name] = pvobj
+            self.providers[f'{prefix}{pv}'] = pvobj
 
-        # String arrays are not really supported in channel access. Skip it.
-        if isinstance(default_value, list) and isinstance(default_value[0], str):
-            return
+        if 'ca' in protos:
+            # Generate a default value suitable for caproto (native types, flattened)
+            default_value = handler.default_value(var, flatten=True, native_python=True)
+            
+            # String arrays are not really supported in channel access. Skip it.
+            if isinstance(default_value, list) and isinstance(default_value[0], str):
+                return
 
-        LOG.debug(f"Creaing CA PV: pv={pv} var_name={var.name}")
-        pvd = PVSpec(
-            name=f"{pv}",
-            value=default_value,
-            put=self._on_caput,
-            **handler.ca_pvspec(var),
-        ).create()
-        self.pvdb[f"{prefix}{pv}"] = pvd
-        self.ca_pvs[var.name] = pvd
+            LOG.debug(f'Creaing CA PV: pv={pv}')
+            pvd = PVSpec(
+                name=f'{pv}',
+                value=default_value,
+                put=self._on_caput,
+                **handler.ca_pvspec(var)
+            ).create()
+            self.pvdb[f'{prefix}{pv}'] = pvd
+            self.ca_pvs[var.name] = pvd
 
     def _add_client(self, pv: str, var: Variable, monitor: bool) -> bool:
         """Setup a new monitor for the specified PV"""
