@@ -53,18 +53,18 @@ _TORCH_TYPECODES = {} if not TORCH_AVAILABLE else {
 }
 
 _NUMPY_TYPECODES = {
-    np.float64: 'doubleValue',
-    np.float32: 'floatValue',
-    np.byte: 'byteValue',
-    np.bool: 'booleanValue',
-    np.int16: 'shortValue',
-    np.int32: 'intValue',
-    np.int64: 'longValue',
-    np.ubyte: 'ubyteValue',
-    np.uint16: 'ushortValue',
-    np.uint32: 'uintValue',
-    np.uint64: 'ulongValue',
-    np.str_: 'stringValue',
+    np.dtype(np.float64): 'doubleValue',
+    np.dtype(np.float32): 'floatValue',
+    np.dtype(np.byte): 'byteValue',
+    np.dtype(np.bool): 'booleanValue',
+    np.dtype(np.int16): 'shortValue',
+    np.dtype(np.int32): 'intValue',
+    np.dtype(np.int64): 'longValue',
+    np.dtype(np.ubyte): 'ubyteValue',
+    np.dtype(np.uint16): 'ushortValue',
+    np.dtype(np.uint32): 'uintValue',
+    np.dtype(np.uint64): 'ulongValue',
+    np.dtype(np.str_): 'stringValue',
     np.dtypes.StringDType(): 'stringValue'
 }
 
