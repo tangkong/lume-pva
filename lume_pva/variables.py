@@ -312,6 +312,18 @@ class NDVariableHandler(VariableHandler[NDVariable | TorchNDVariable]):
         if typecode is not None:
             return typecode
 
+        # NDVariable may expose dtype as a numpy scalar class (e.g. np.float64).
+        # Normalize to np.dtype so lookups match the _NUMPY_TYPECODES keys.
+        try:
+            normalized_dtype = np.dtype(variable.dtype)
+        except TypeError:
+            normalized_dtype = None
+
+        if normalized_dtype is not None:
+            typecode = _NUMPY_TYPECODES.get(normalized_dtype)
+            if typecode is not None:
+                return typecode
+
         raise TypeError(f'{variable.name}: Unsupported type "{variable.dtype.__class__}"')
 
     def is_supported(self, variable: NDVariable | TorchNDVariable):
@@ -531,7 +543,7 @@ class EnumVariableHandler(VariableHandler):
         }
 
 
-def find_variable_handler(type: type[Variable]) -> VariableHandler | None:
+def find_variable_handler(variable_type: type[Variable]) -> VariableHandler | None:
     VARIABLE_HANDLERS: dict[type[Variable], VariableHandler] = {
         ScalarVariable: ScalarVariableHandler(),
         IntVariable: ScalarVariableHandler(),
@@ -543,4 +555,12 @@ def find_variable_handler(type: type[Variable]) -> VariableHandler | None:
     if TORCH_AVAILABLE:
         VARIABLE_HANDLERS[TorchScalarVariable] = TorchScalarVariableHandler()
         VARIABLE_HANDLERS[TorchNDVariable] = NDVariableHandler()
-    return VARIABLE_HANDLERS.get(type, None)
+
+    # Resolve using the class MRO so subclasses of supported variable types
+    # automatically use their nearest matching base handler.
+    for cls in variable_type.__mro__:
+        handler = VARIABLE_HANDLERS.get(cls)
+        if handler is not None:
+            return handler
+
+    return None
