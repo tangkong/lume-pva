@@ -1,31 +1,27 @@
+import asyncio
+import logging
+import math
+import time
+from collections.abc import Callable
+from enum import IntEnum
+from queue import Empty, Queue
+from typing import Any, TypedDict
+
+import caproto
+import caproto.asyncio.server
+import p4p.client.thread
+import p4p.server
+import pvua
+from caproto.server import PvpropertyData, PVSpec
 from lume.model import LUMEModel, Variable
-from lume.variables import Variable, ParticleGroupVariable
+from lume.variables import ParticleGroupVariable
+from p4p import Type, Value
+from p4p.client.thread import Subscription
+from p4p.nt import NTScalar
 from p4p.server import ServerOperation
 from p4p.server.thread import SharedPV
-from p4p.client.thread import Subscription, Disconnected, RemoteError, Cancelled
-from p4p.nt import NTScalar
-from p4p import Value, Type
-from typing import Any, Dict, TypedDict
-from collections.abc import Callable
-from queue import Queue
-from enum import IntEnum
+
 from lume_pva.variables import VariableHandler, find_variable_handler
-from caproto.server import PVSpec, PvpropertyData, pvproperty
-from caproto import SkipWrite
-import caproto.server
-import caproto.asyncio.server
-import caproto
-import time
-import math
-import p4p.server
-import p4p.client.thread
-import p4p.nt
-import logging
-import pvua
-import sys
-import threading
-import socket
-import asyncio
 
 LOG = logging.getLogger("LumePva")
 logging.getLogger("caproto").setLevel(logging.WARNING)
@@ -84,20 +80,20 @@ class RunnerConfig(TypedDict):
 
     remote_model_mode: str
     prefix: str
-    variables: Dict[str, RunnerVariable]
+    variables: dict[str, RunnerVariable]
     protocol: list[str]
 
 
 class Runner:
     """Simple runner for LUMEModel derived models"""
 
-    pvs: Dict[str, SharedPV]
-    ca_pvs: Dict[str, PvpropertyData]
-    pv_handlers: Dict[str, VariableHandler]
+    pvs: dict[str, SharedPV]
+    ca_pvs: dict[str, PvpropertyData]
+    pv_handlers: dict[str, VariableHandler]
     # List of all output PVs that need to be updated after simulation
     outputs: list[str]
-    values: Dict[str, Value]
-    subs: Dict[str, Subscription]
+    values: dict[str, Value]
+    subs: dict[str, Subscription]
 
     class Handler:
         """
@@ -161,7 +157,7 @@ class Runner:
         self.providers = {}  # Just for renaming
         self.pvdb = {}  # For caproto
         self.snapshot_pvs = []
-        self.pv_to_var: Dict[str, str] = {}  # Map pv name -> variable name
+        self.pv_to_var: dict[str, str] = {}  # Map pv name -> variable name
         self.var_to_pv = {}
         self.ca_pvs = {}
         self.pvua_context = pvua.Context()
@@ -262,7 +258,8 @@ class Runner:
     async def _run_caproto(self):
         self.ca_queue = asyncio.Queue()
         self.caproto_ctx = caproto.asyncio.server.Context(self.pvdb)
-        asyncio.create_task(self.caproto_ctx.run())
+        # TODO: actually do something with this task
+        asyncio.create_task(self.caproto_ctx.run())  # noqa
 
     @staticmethod
     def generate_config(
@@ -331,36 +328,32 @@ class Runner:
         handler : VariableHandler
             The variable handler for this variable type
         """
-        protos = self.config.get('protocol', ['ca', 'pva'])
+        protos = self.config.get("protocol", ["ca", "pva"])
 
-        if 'pva' in protos:
+        if "pva" in protos:
             pvobj = SharedPV(
-                handler=Runner.Handler(
-                    variable=var,
-                    runner=self,
-                    read_only=ro
-                ),
-                initial=self._generate_value(var.name, None)
+                handler=Runner.Handler(variable=var, runner=self, read_only=ro),
+                initial=self._generate_value(var.name, None),
             )
             self.pvs[var.name] = pvobj
-            self.providers[f'{prefix}{pv}'] = pvobj
+            self.providers[f"{prefix}{pv}"] = pvobj
 
-        if 'ca' in protos:
+        if "ca" in protos:
             # Generate a default value suitable for caproto (native types, flattened)
             default_value = handler.default_value(var, flatten=True, native_python=True)
-            
+
             # String arrays are not really supported in channel access. Skip it.
             if isinstance(default_value, list) and isinstance(default_value[0], str):
                 return
 
-            LOG.debug(f'Creaing CA PV: pv={pv}')
+            LOG.debug(f"Creaing CA PV: pv={pv}")
             pvd = PVSpec(
-                name=f'{pv}',
+                name=f"{pv}",
                 value=default_value,
                 put=self._on_caput,
-                **handler.ca_pvspec(var)
+                **handler.ca_pvspec(var),
             ).create()
-            self.pvdb[f'{prefix}{pv}'] = pvd
+            self.pvdb[f"{prefix}{pv}"] = pvd
             self.ca_pvs[var.name] = pvd
 
     def _add_client(self, pv: str, var: Variable, monitor: bool) -> bool:
@@ -424,9 +417,7 @@ class Runner:
             return
         var = self.pv_to_var.get(instance.name)
         if var is None:
-            LOG.warning(
-                f"CA: Unknown variable {instance.name} has no entry in PV -> VAR mapping"
-            )
+            LOG.warning(f"CA: Unknown variable {instance.name} has no entry in PV -> VAR mapping")
             return
         if self.model.supported_variables[var].read_only:
             LOG.warning(
@@ -439,9 +430,7 @@ class Runner:
         """Create any required control PVs"""
         pvname = f"{self.config['prefix']}SNAPSHOT"
         if pvname in self.providers:
-            raise RuntimeError(
-                f"Fatal name conflict: {pvname} for the snapshot PV already exists!"
-            )
+            raise RuntimeError(f"Fatal name conflict: {pvname} for the snapshot PV already exists!")
 
         self.providers[pvname] = SharedPV(initial=NTScalar("d").wrap(0))
 
@@ -469,9 +458,7 @@ class Runner:
         """Callback from p4p monitor updates"""
         self.queue.put({self.pv_to_var[pvname]: {"value": value, "ts": time.time()}})
 
-    def _generate_value(
-        self, pv: str, value: Any | None, ts: float | None = None
-    ) -> Value:
+    def _generate_value(self, pv: str, value: Any | None, ts: float | None = None) -> Value:
         """
         Generates a new value for posting to the PV.
         Handles alarm updates, timestamp updates, and generating the value in the first place. This handles the
@@ -510,7 +497,7 @@ class Runner:
                 try:
                     up = self.queue.get_nowait()
                     break
-                except:
+                except Empty:
                     pass
                 finally:
                     # Give the CA task a bit of breathing room. This is pretty ugly, but is ultimately a problem because we're mixing async and non-async threading.
@@ -525,7 +512,7 @@ class Runner:
                     # Just go until we're empty
                     while True:
                         up.update(self.queue.get_nowait())
-                except:
+                except Empty:
                     pass
 
             new_values = {}
@@ -556,18 +543,14 @@ class Runner:
             set_start = time.perf_counter()
             LOG.debug(f"Setting model with new values: {new_values}")
             self.model.set(new_values)
-            LOG.debug(
-                f"Model set() took {(time.perf_counter() - set_start) * 1000.0:.3f} ms"
-            )
+            LOG.debug(f"Model set() took {(time.perf_counter() - set_start) * 1000.0:.3f} ms")
 
             self.async_runner.run(asyncio.sleep(0.05))
 
             # Get new simulated values
             get_start = time.perf_counter()
             out_values = self.model.get(self.model.supported_variables)
-            LOG.debug(
-                f"Model get() took {(time.perf_counter() - get_start) * 1000.0:.3f} ms"
-            )
+            LOG.debug(f"Model get() took {(time.perf_counter() - get_start) * 1000.0:.3f} ms")
 
             ca_updates = []
 
@@ -591,16 +574,16 @@ class Runner:
                 capv = self.ca_pvs.get(k)
                 if capv is not None:
                     # caproto can only understand native python types, not necessarily what the model gives us.
-                    nv = self.pv_handlers[k].value_to_native(
-                        self.model.supported_variables[k], v
-                    )
+                    nv = self.pv_handlers[k].value_to_native(self.model.supported_variables[k], v)
 
                     # Batching updates yet again
-                    ca_updates.append({
-                        "pv": capv,
-                        "value": nv,
-                        "ts": latest_ts,
-                    })
+                    ca_updates.append(
+                        {
+                            "pv": capv,
+                            "value": nv,
+                            "ts": latest_ts,
+                        }
+                    )
 
             self.model_state = ModelState.Posting
 
