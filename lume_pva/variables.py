@@ -312,18 +312,6 @@ class NDVariableHandler(VariableHandler[NDVariable | TorchNDVariable]):
         if typecode is not None:
             return typecode
 
-        # NDVariable may expose dtype as a numpy scalar class (e.g. np.float64).
-        # Normalize to np.dtype so lookups match the _NUMPY_TYPECODES keys.
-        try:
-            normalized_dtype = np.dtype(variable.dtype)
-        except TypeError:
-            normalized_dtype = None
-
-        if normalized_dtype is not None:
-            typecode = _NUMPY_TYPECODES.get(normalized_dtype)
-            if typecode is not None:
-                return typecode
-
         raise TypeError(f'{variable.name}: Unsupported type "{variable.dtype.__class__}"')
 
     def is_supported(self, variable: NDVariable | TorchNDVariable):
