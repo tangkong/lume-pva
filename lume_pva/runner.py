@@ -186,8 +186,9 @@ class Runner:
         self.var_to_pv = {}
         self.ca_pvs = {}
         self.pvua_context = pvua.Context()
-        self.ca_server: pcaspy.SimpleServer
-        self.ca_driver: Runner.CaDriver
+        self.ca_server: pcaspy.SimpleServer | None = None
+        self.ca_driver: Runner.CaDriver | None = None
+
 
         # Generate default config
         if config is None:
@@ -232,7 +233,7 @@ class Runner:
 
             handler = find_variable_handler(type(var))
             if handler is None:
-                if type(var) is ParticleGroupVariable:
+                if isinstance(var, ParticleGroupVariable):
                     continue  # ParticleGroupVariable is a special case that doesn't have a handler
                 raise RuntimeError(f'Unknown type "{type(var)}"')
 
@@ -284,7 +285,8 @@ class Runner:
             self.ca_driver = Runner.CaDriver(self)
 
             # Spin up a thread to run the pcaspy update loop
-            self.ca_thread = threading.Thread(target=self._run_pcaspy)
+            self.ca_thread = threading.Thread(target=self._run_pcaspy, daemon=True)
+
             self.ca_thread.start()
 
         # Kick off an initial update to propagate any defaults the model may have set
@@ -387,7 +389,7 @@ class Runner:
 
             LOG.debug(f'Creaing CA PV: pv={pv}')
             spec = handler.ca_pvspec(var)
-            #spec.update({"value": default_value})
+
             self.pvdb[f'{prefix}{pv}'] = spec
             self.ca_pvs[var.name] = pv
 

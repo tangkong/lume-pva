@@ -108,7 +108,7 @@ class SimpleSimulator():
         self.driver = pcaspy.Driver()
 
         # Run thread
-        self.thread = threading.Thread(target=self._thread_proc)
+        self.thread = threading.Thread(target=self._thread_proc, daemon=True)
         self.thread.start()
 
     def _thread_proc(self):

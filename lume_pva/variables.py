@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import operator
 from abc import ABC, abstractmethod
 from typing import Any, Generic, TypeVar
+from functools import reduce
 
 import numpy as np
-from caproto import ChannelType
 from lume.variables import (
     BoolVariable,
     EnumVariable,
@@ -555,7 +556,7 @@ class EnumVariableHandler(VariableHandler):
         }
 
 
-def find_variable_handler(type: type[Variable]) -> VariableHandler | None:
+def find_variable_handler(variable_type: type[Variable]) -> VariableHandler | None:
     VARIABLE_HANDLERS: dict[type[Variable], VariableHandler] = {
         ScalarVariable: ScalarVariableHandler(),
         IntVariable: ScalarVariableHandler(),
@@ -567,4 +568,12 @@ def find_variable_handler(type: type[Variable]) -> VariableHandler | None:
     if TORCH_AVAILABLE:
         VARIABLE_HANDLERS[TorchScalarVariable] = TorchScalarVariableHandler()
         VARIABLE_HANDLERS[TorchNDVariable] = NDVariableHandler()
-    return VARIABLE_HANDLERS.get(type, None)
+
+    # Resolve using the class MRO so subclasses of supported variable types
+    # automatically use their nearest matching base handler.
+    for cls in variable_type.__mro__:
+        handler = VARIABLE_HANDLERS.get(cls)
+        if handler is not None:
+            return handler
+
+    return None
