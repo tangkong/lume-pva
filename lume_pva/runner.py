@@ -7,7 +7,7 @@ from p4p.nt import NTScalar
 from p4p import Value, Type
 from typing import Any, Dict, TypedDict
 from collections.abc import Callable
-from queue import Queue
+from queue import Empty, Queue
 from enum import IntEnum
 from lume_pva.variables import VariableHandler, find_variable_handler
 import time
@@ -95,7 +95,7 @@ class Runner:
         model: LUMEModel
         variable: Variable
 
-        def __init__(self, variable: Variable, runner, read_only: bool):
+        def __init__(self, variable: Variable, runner: "Runner", read_only: bool):
             self.model = runner.model
             self.variable = variable
             self.runner = runner
@@ -106,18 +106,19 @@ class Runner:
                 op.done(error="Read only PV")
             else:
                 # Update PVs in simulator
-                self.runner.queue.put(
-                    {self.variable.name: {"value": op.value(), "ts": time.monotonic()}}
+                self.runner._enqueue(
+                    {self.variable.name: {"value": op.value(), "ts": time.monotonic()}},
+                    done=lambda error: op.done(error=error)
                 )
                 pv.post(op.value())
-                op.done()
+                LOG.debug(f"Setting PVA: {self.variable.name} -> {op.value()}")
 
         def rpc(self, op: ServerOperation):
             op.done()
 
     class CaDriver(pcaspy.Driver):
         """ChannelAccess driver handling operations on behalf of the Runner class"""
-        def __init__(self, runner):
+        def __init__(self, runner: "Runner"):
             super().__init__()
             self.runner = runner
 
@@ -147,9 +148,14 @@ class Runner:
                 nv = desc["enums"][value]
 
             # Insert into update queue
-            self.runner.queue.put({vn: {"value": nv, "ts": time.monotonic()}})
+            def _complete_put():
+                self.setParam(reason, value)
+                self.callbackPV(reason)
 
-            self.setParam(reason, value)
+            self.runner._enqueue(
+                {vn: {"value": nv, "ts": time.monotonic()}},
+                done=lambda error: _complete_put()
+            )
             return True
 
     def __init__(
@@ -291,7 +297,7 @@ class Runner:
             self.ca_thread.start()
 
         # Kick off an initial update to propagate any defaults the model may have set
-        self.queue.put({})
+        self._enqueue({})
 
     def _run_pcaspy(self):
         """Run pcaspy forever"""
@@ -347,6 +353,23 @@ class Runner:
             }
         return config
 
+    def _enqueue(self, values: Dict[str, Any], done: Callable[[str | None], None] | None = None) -> None:
+        """
+        Enqueue a batch of PV updates to be applied to the model.
+
+        Parameters
+        ----------
+        values : Dict[str, Any]
+            Mapping of variable name -> {"value": ..., "ts": ...}
+        done : Callable[[str | None], None] | None
+            Optional completion callback. Invoked once the simulation that
+            consumes these values has finished (or failed). Receives an error
+            string on failure, or None on success. Used to defer signalling
+            put-completion to clients until results are actually available.
+        """
+        self.queue.put({"values": values, "done": [done] if done is not None else []})
+
+
     def _add_pv(
         self, pv: str, var: Variable, ro: bool, prefix: str, handler: VariableHandler
     ) -> None:
@@ -393,6 +416,8 @@ class Runner:
             spec = handler.ca_pvspec(var)
 
             self.pvdb[f'{prefix}{pv}'] = spec
+            self.pvdb[f'{prefix}{pv}'].update({"asyn": True})
+            # enable async for put-completion
             self.ca_pvs[var.name] = pv
 
     def _add_client(self, pv: str, var: Variable, monitor: bool) -> bool:
@@ -476,11 +501,11 @@ class Runner:
                 "value": self.pvua_context.get(pv),
                 "ts": time.monotonic(),
             }
-        self.queue.put(new_values)
+        self._enqueue(new_values)
 
     def _monitor_callback(self, pvname, value, **kwargs):
         """Callback from p4p monitor updates"""
-        self.queue.put({self.pv_to_var[pvname]: {"value": value, "ts": time.monotonic()}})
+        self._enqueue({self.pv_to_var[pvname]: {"value": value, "ts": time.monotonic()}})
 
     def _generate_value(
         self, pv: str, value: Any | None, ts: float | None = None
@@ -519,19 +544,24 @@ class Runner:
         """
         while True:
             # Wait for new data to come in
-            up = self.queue.get()
+            item = self.queue.get()
+
+            value_data: dict = item["values"]
+            done_callbacks: list = item["done"]
 
             # Wait for a time window of 'update_rate' seconds to pass before continuing
             until = time.monotonic() + self.update_rate
             while time.monotonic() < until:
                 try:
-                    up.update(self.queue.get_nowait())
-                except:
+                    next_update = self.queue.get_nowait()
+                    value_data.update(next_update["values"])
+                    done_callbacks.extend(next_update["done"])
+                except Empty:
                     pass
 
             new_values = {}
             latest_ts = 0.0
-            for k, g in up.items():
+            for k, g in value_data.items():
                 v = g["value"]
                 ts = g["ts"]
 
@@ -552,52 +582,66 @@ class Runner:
                 latest_ts = time.monotonic()
 
             # Set and simulate
-            set_start = time.perf_counter()
-            LOG.debug(f"Setting model with new values: {new_values}")
-            self.model.set(new_values)
-            LOG.debug(
-                f"Model set() took {(time.perf_counter() - set_start) * 1000.0:.3f} ms"
-            )
+            sim_error = None
+            try:
+                set_start = time.perf_counter()
+                LOG.debug(f"Setting model with new values: {new_values}")
+                self.model.set(new_values)
+                LOG.debug(
+                    f"Model set() took {(time.perf_counter() - set_start) * 1000.0:.3f} ms"
+                )
 
-            # Get new simulated values
-            get_start = time.perf_counter()
-            out_values = self.model.get(self.model.supported_variables)
-            LOG.debug(
-                f"Model get() took {(time.perf_counter() - get_start) * 1000.0:.3f} ms"
-            )
+                # Get new simulated values
+                get_start = time.perf_counter()
+                out_values = self.model.get(self.model.supported_variables)
+                LOG.debug(
+                    f"Model get() took {(time.perf_counter() - get_start) * 1000.0:.3f} ms"
+                )
 
-            # Update output PVs with new values
-            pv_update_start = time.perf_counter()
-            LOG.debug(f"writing {len(out_values)} PVs")
-            for k, v in out_values.items():
-                # Avoid attempting to post to client monitors
-                if k in self.subs:
-                    continue
+                # Update output PVs with new values
+                pv_update_start = time.perf_counter()
+                LOG.debug(f"writing {len(out_values)} PVs")
+                for k, v in out_values.items():
+                    # Avoid attempting to post to client monitors
+                    if k in self.subs:
+                        continue
 
-                # Update PVA component
-                pv = self.pvs.get(k)
-                if pv is not None:
+                    # Update PVA component
+                    pv = self.pvs.get(k)
+                    if pv is not None:
+                        try:
+                            pv.post(self._generate_value(k, v, latest_ts))
+                        except Exception as e:
+                            LOG.error(f"Error posting value for {k}: {e}")
+
+                    # Update CA component
+                    capv = self.ca_pvs.get(k)
+                    if capv is not None and self.ca_driver is not None:
+                        # pcaspy can only understand native python types, not necessarily what the model gives us.
+                        nv = self.pv_handlers[k].value_to_native(
+                            self.model.supported_variables[k], v
+                        )
+
+                        self.ca_driver.setParam(capv, nv, pcaspy.cas.epicsTimeStamp.fromPosixTimeStamp(latest_ts))
+
+                if self.ca_driver is not None:
+                    self.ca_driver.updatePVs()
+
+                LOG.debug(
+                    f"PV update loop took {(time.perf_counter() - pv_update_start) * 1000.0:.3f} ms"
+                )
+            except Exception as exc:
+                sim_error = str(exc)
+                LOG.error(f"Simulation Cycle Failed: ({sim_error})")
+                raise
+            finally:
+                # With simulation compoleted, signal put completion to any waitihng clients
+                for cb in done_callbacks:
                     try:
-                        pv.post(self._generate_value(k, v, latest_ts))
-                    except Exception as e:
-                        LOG.error(f"Error posting value for {k}: {e}")
+                        cb(sim_error)
+                    except Exception as excp:
+                        LOG.error(f"Error signalling put-completion: {excp}")
 
-                # Update CA component
-                capv = self.ca_pvs.get(k)
-                if capv is not None and self.ca_driver is not None:
-                    # pcaspy can only understand native python types, not necessarily what the model gives us.
-                    nv = self.pv_handlers[k].value_to_native(
-                        self.model.supported_variables[k], v
-                    )
-
-                    self.ca_driver.setParam(capv, nv, pcaspy.cas.epicsTimeStamp.fromPosixTimeStamp(latest_ts))
-
-            if self.ca_driver is not None:
-                self.ca_driver.updatePVs()
-
-            LOG.debug(
-                f"PV update loop took {(time.perf_counter() - pv_update_start) * 1000.0:.3f} ms"
-            )
 
     def run(self):
         """
