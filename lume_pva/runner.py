@@ -105,7 +105,7 @@ class Runner:
             else:
                 # Update PVs in simulator
                 self.runner.queue.put(
-                    {self.variable.name: {"value": op.value(), "ts": time.time()}}
+                    {self.variable.name: {"value": op.value(), "ts": time.monotonic()}}
                 )
                 pv.post(op.value())
                 op.done()
@@ -145,7 +145,7 @@ class Runner:
                 nv = desc["enums"][value]
 
             # Insert into update queue
-            self.runner.queue.put({vn: {"value": nv, "ts": time.time()}})
+            self.runner.queue.put({vn: {"value": nv, "ts": time.monotonic()}})
 
             self.setParam(reason, value)
             return True
@@ -278,8 +278,7 @@ class Runner:
 
         # Start the CA server under the shared async context
         if len(self.pvdb.keys()) > 0:
-            if "EPICS_CA_MAX_ARRAY_BYTES" not in os.environ:
-                os.environ["EPICS_CA_MAX_ARRAY_BYTES"] = str(self.config["max_array_bytes"])
+            os.environ["EPICS_CA_MAX_ARRAY_BYTES"] = str(self.config["max_array_bytes"])
             self.ca_server = pcaspy.SimpleServer()
             self.ca_server.createPV(self.config.get("prefix", ""), self.pvdb)
             self.ca_driver = Runner.CaDriver(self)
@@ -328,7 +327,7 @@ class Runner:
             "description": "",
             "remote_model_mode": "continuous",
             "prefix": prefix,
-            "max_array_bytes": 80000000,
+            "max_array_bytes": os.environ["EPICS_CA_MAX_ARRAY_BYTES"],
             "variables": {},
         }
         for k, v in model.supported_variables.items():
@@ -472,13 +471,13 @@ class Runner:
         for pv in self.snapshot_pvs:
             new_values[self.pv_to_var[pv]] = {
                 "value": self.pvua_context.get(pv),
-                "ts": time.time(),
+                "ts": time.monotonic(),
             }
         self.queue.put(new_values)
 
     def _monitor_callback(self, pvname, value, **kwargs):
         """Callback from p4p monitor updates"""
-        self.queue.put({self.pv_to_var[pvname]: {"value": value, "ts": time.time()}})
+        self.queue.put({self.pv_to_var[pvname]: {"value": value, "ts": time.monotonic()}})
 
     def _generate_value(
         self, pv: str, value: Any | None, ts: float | None = None
@@ -501,7 +500,7 @@ class Runner:
         Helper to update timestamp on a value
         """
         if ts is None:
-            ts = time.time()
+            ts = time.monotonic()
         value["timeStamp"]["nanoseconds"] = math.fmod(ts, 1.0) * 1e9
         value["timeStamp"]["secondsPastEpoch"] = int(ts)
 
@@ -520,8 +519,8 @@ class Runner:
             up = self.queue.get()
 
             # Wait for a time window of 'update_rate' seconds to pass before continuing
-            until = time.time() + self.update_rate
-            while time.time() < until:
+            until = time.monotonic() + self.update_rate
+            while time.monotonic() < until:
                 try:
                     up.update(self.queue.get_nowait())
                 except:
@@ -547,7 +546,7 @@ class Runner:
 
             # Use current time if we're missing a latest timestamp
             if latest_ts <= 0:
-                latest_ts = time.time()
+                latest_ts = time.monotonic()
 
             # Set and simulate
             set_start = time.perf_counter()
