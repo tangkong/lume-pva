@@ -52,7 +52,6 @@ OP_TIMEOUT = 10.0
 # correct put cannot return -- this is a lower bound, not a race.
 BLOCK_WINDOW = 0.5
 
-
 # pin process start method for consistency
 _MP = multiprocessing.get_context("spawn")
 
@@ -224,6 +223,7 @@ def _assert_put_completion(harness: RunnerHandle, putter: Callable[[], None]) ->
     # Let the simulation finish; the put must now complete.
     harness.release.set()
     assert put_returned.wait(timeout=OP_TIMEOUT), "put never completed"
+    # Finish the put action.  Thread will fail to join if put does not complete
     thread.join(timeout=OP_TIMEOUT)
     assert not errors, f"put raised: {errors[0]!r}"
 
@@ -231,7 +231,7 @@ def _assert_put_completion(harness: RunnerHandle, putter: Callable[[], None]) ->
 def test_pva_put_waits_for_simulation(harness: RunnerHandle) -> None:
     with Context("pva") as ctx:
         _assert_put_completion(
-            harness, lambda: ctx.put("input_a", 5.0, timeout=OP_TIMEOUT)
+            harness, lambda: ctx.put("input_a", 5.0, timeout=OP_TIMEOUT, wait=True)
         )
 
         assert harness.completed.is_set()
@@ -239,8 +239,10 @@ def test_pva_put_waits_for_simulation(harness: RunnerHandle) -> None:
 
 
 def test_ca_put_waits_for_simulation(harness: RunnerHandle) -> None:
+    # caput timeout needs to essentially run forever, to `_assert_put_completion` to check
+    # if the thread has completed.
     _assert_put_completion(
-        harness, lambda: epics.caput("input_a", 7.0, wait=True, timeout=OP_TIMEOUT)
+        harness, lambda: epics.caput("input_a", 7.0, wait=True, timeout=10*OP_TIMEOUT)
     )
 
     assert harness.completed.is_set()
