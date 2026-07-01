@@ -28,8 +28,11 @@ import threading
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from multiprocessing.synchronize import Event as mpEvent
+from typing import Any
 
 import pytest
+from lume.exceptions import ReadOnlyError
+from lume.variables.variable import ConfigEnum, Variable
 
 # Keep all EPICS traffic on the loopback interface. Must be set before p4p,
 # pyepics, or the pcaspy server (created in Runner.__init__) initialise.
@@ -98,6 +101,27 @@ class GatedModel(LUMEModel):
     def _get(self, names: list[str]) -> dict[str, float]:
         return {name: self._state[name] for name in names}
 
+    def set(self, values: dict[str, Any]) -> None:
+        # vendor LUMEModel.set, but error if validation fails
+        # Validate input values
+        for name in values.keys():
+            if name not in self.supported_variables:
+                raise ValueError(f"Variable '{name}' is not supported by the model.")
+            else:
+                variable = self.supported_variables[name]
+                if not isinstance(variable, Variable):
+                    raise ValueError(f"Variable '{name}' is not a valid Variable instance.")
+
+                if variable.read_only:
+                    raise ReadOnlyError(f"Variable '{name}' is read-only. Cannot be set.")
+                try:
+                    variable.validate_value(values[name], config=ConfigEnum.ERROR)
+                except (ValueError, TypeError) as exc:
+                    raise type(exc)(f"Validation failed for variable '{name}': {exc}") from exc
+
+        # Set the control parameters of the simulator
+        self._set(values)
+
     def _set(self, values: dict[str, float]) -> None:
         self.entered.set()
         if not self.release.wait(timeout=OP_TIMEOUT):
@@ -134,6 +158,8 @@ def _serve(release: mpEvent, entered: mpEvent, completed: mpEvent, ready: mpEven
 
     # Server startup cycle complete
     ready.set()
+    # Mutate state directly for cache testing (thread safety be damned)
+    model._state = {"input_a": 1.0, "sum_output": -20.0}
     # block until terminated
     threading.Event().wait()
 
@@ -147,7 +173,8 @@ class RunnerHandle:
 
 @pytest.fixture(scope="function")
 def harness() -> Generator[RunnerHandle, None, None]:
-    """Run a Runner in a child process and yield the shared gate + a PVA client.
+    """
+    Run a Runner in a child process and yield the shared gate + a PVA client.
 
     Function-scoped: each test gets a pristine child, and terminating it on
     teardown reclaims the EPICS ports so tests stay independent.
@@ -247,3 +274,33 @@ def test_ca_put_waits_for_simulation(harness: RunnerHandle) -> None:
 
     assert harness.completed.is_set()
     assert float(epics.caget("sum_output", timeout=OP_TIMEOUT)) == pytest.approx(14.0)
+
+
+def test_standard_sim(harness: RunnerHandle):
+    # attempt set out of bounds, no need to wait
+    epics.caput("input_a", 10.0)
+
+    # assert model set has completed
+    assert harness.completed.is_set()
+    assert float(epics.caget("sum_output", timeout=OP_TIMEOUT)) == pytest.approx(20.0)
+    assert float(epics.caget("input_a", timeout=OP_TIMEOUT)) == pytest.approx(10.0)
+
+
+def test_failed_sim(harness: RunnerHandle):
+    # Assert initial state
+    assert float(epics.caget("input_a", timeout=OP_TIMEOUT)) == pytest.approx(0.0)
+    assert float(epics.caget("sum_output", timeout=OP_TIMEOUT)) == pytest.approx(0.0)
+
+    # Reasonable input
+    epics.caput("input_a", 4.2, wait=True)
+
+    # Verify record has processed
+    assert float(epics.caget("input_a", timeout=OP_TIMEOUT)) == pytest.approx(4.2)
+    assert float(epics.caget("sum_output", timeout=OP_TIMEOUT)) == pytest.approx(8.4)
+
+    # attempt set out of bounds
+    epics.caput("input_a", 7.0e6, wait=True)
+
+    # reverting to previous (cached) value, runner is still operational
+    assert float(epics.caget("input_a", timeout=OP_TIMEOUT)) == pytest.approx(4.2)
+    assert float(epics.caget("sum_output", timeout=OP_TIMEOUT)) == pytest.approx(8.4)
